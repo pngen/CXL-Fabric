@@ -1,0 +1,57 @@
+# Build directories
+build/
+build-*/
+out/
+cmake-build-*/
+_install/
+_installed/
+_scratch/
+
+# Fresh clone / consumer scratch
+_clone/
+_consumer/
+_verify/
+_tmp*/
+
+# Compiled artifacts
+*.obj
+*.o
+*.lib
+*.exe
+*.pdb
+*.ilk
+*.dll
+*.so
+*.a
+*.dylib
+
+# Generated / temp
+*.log
+*.tmp
+*.bak
+*.swp
+*.vcxproj
+*.vcxproj.user
+*.sln
+*.suo
+*.user
+.vs/
+compile_commands.json
+CMakeUserPresets.json
+
+# Test artifacts
+Testing/
+*.xml
+TestResult.*
+*.trx
+
+# Crash dumps / sanitizer
+*.dmp
+*.pdb
+*.hprof
+core.*
+
+# Vim/Editor
+.idea/
+.vscode/
+*.code-workspace
