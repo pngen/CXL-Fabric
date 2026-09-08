@@ -28,3 +28,19 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_multiprocess.cpp")
                    $<TARGET_FILE:cxl_fabric_coordinator>
                    $<TARGET_FILE:cxl_fabric_worker>)
 endif()
+
+# The query regression proof drives the same real coordinator/worker executables
+# but observes state exclusively over the QUERY_STATE transport channel.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_query.cpp")
+  add_executable(test_query test_query.cpp)
+  target_link_libraries(test_query PRIVATE CXLFabric::core CXLFabric::synthetic CXLFabric::system)
+  cxl_fabric_set_warnings(test_query)
+  cxl_fabric_apply_asan(test_query)
+  if(MSVC)
+    target_link_libraries(test_query PRIVATE ws2_32)
+  endif()
+  add_test(NAME test_query
+           COMMAND test_query
+                   $<TARGET_FILE:cxl_fabric_coordinator>
+                   $<TARGET_FILE:cxl_fabric_worker>)
+endif()

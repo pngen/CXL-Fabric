@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(CXLFabric VERSION 1.0.0
+project(CXLFabric VERSION 1.0.1
         DESCRIPTION "CXL Fabric - CXL-class memory infrastructure governance"
         LANGUAGES CXX)
 

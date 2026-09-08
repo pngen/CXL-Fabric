@@ -420,7 +420,8 @@ SelectionOutcome Fabric::build_selection(const StateSnapshot& snap, const Admiss
 }
 
 SelectionOutcome Fabric::select(const AdmissionRequest& req) const {
-  StateSnapshot snap = snapshot();
+  std::lock_guard<std::mutex> lock(mutex_);
+  StateSnapshot snap = selection_snapshot_locked();
   return build_selection(snap, req);
 }
 
@@ -432,7 +433,7 @@ ReserveOutcome Fabric::reserve(const AdmissionRequest& req, const AuthorityConte
   if (req.bytes == 0) {
     ReserveOutcome o; o.reason = DecisionReason::INVALID_ARGUMENT; return o;
   }
-  StateSnapshot snap = state_;  // copy under lock for selection
+  StateSnapshot snap = selection_snapshot_locked();  // capacity view only
   SelectionOutcome sel = build_selection(snap, req);
   if (!sel.ok) {
     ReserveOutcome o; o.reason = sel.result.reason; return o;
@@ -735,6 +736,23 @@ AuditReport Fabric::audit() const {
 StateSnapshot Fabric::snapshot() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return state_;
+}
+
+StateSnapshot Fabric::selection_snapshot_locked() const {
+  // Selection evaluates capacity-bearing records only (devices/pools/regions).
+  // The reservation ledger is excluded: it grows monotonically as reservations
+  // are reserved/committed/released and never factors into a placement decision,
+  // so copying it would turn every admission into a deep copy of the whole
+  // history (O(n^2) under churn). Callers hold the lock.
+  StateSnapshot snap;
+  snap.coordinator_epoch = state_.coordinator_epoch;
+  snap.policy_generation = state_.policy_generation;
+  snap.evidence_generation = state_.evidence_generation;
+  snap.global_ledger = state_.global_ledger;
+  snap.devices = state_.devices;
+  snap.regions = state_.regions;
+  snap.pools = state_.pools;
+  return snap;
 }
 
 }  // namespace cxl_fabric

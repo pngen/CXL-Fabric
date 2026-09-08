@@ -25,7 +25,11 @@ static void kill(const Proc& p) {
   if (p.pi.hThread) CloseHandle(p.pi.hThread);
 }
 // Spawn with lpApplicationName set so a space-containing path launches fine.
-static bool spawn2(const std::string& exe, const std::string& args, const std::string& outfile) {
+// The child's PROCESS_INFORMATION is returned via `out` so the caller can truly
+// terminate and close it. Previously this returned only a bool and dropped the
+// handle, so kill() was a no-op: the long-lived coordinator processes (which run
+// until signalled) leaked on every proof run.
+static bool spawn2(const std::string& exe, const std::string& args, const std::string& outfile, Proc& out) {
   std::string cmd = exe + " " + args;
   STARTUPINFOA si{}; si.cb = sizeof(si);
   HANDLE hOut = INVALID_HANDLE_VALUE;
@@ -37,6 +41,7 @@ static bool spawn2(const std::string& exe, const std::string& args, const std::s
   BOOL ok = CreateProcessA(exe.c_str(), const_cast<char*>(cmd.data()), nullptr, nullptr, TRUE,
                            CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
   if (hOut != INVALID_HANDLE_VALUE) CloseHandle(hOut);
+  out.pi = pi;
   return ok == TRUE;
 }
 
@@ -100,10 +105,10 @@ int main(int argc, char** argv) {
     std::string resultsA = (dir / "cxl_mp_workerA.txt").string();
     std::string resultsA2 = (dir / "cxl_mp_workerA2.txt").string();
     std::string coordlog1 = (dir / "cxl_mp_c1.log").string();
-    Proc c; c.valid = spawn2(coord, "--port " + std::to_string(port) + " --epoch 1 --statefile " + sf, coordlog1);
+    Proc c; c.valid = spawn2(coord, "--port " + std::to_string(port) + " --epoch 1 --statefile " + sf, coordlog1, c);
     CHECK(c.valid, "coordinator spawned");
     CHECK(wait_port(port, 5000), "coordinator listening");
-    Proc wa; wa.valid = spawn2(worker, "--port " + std::to_string(port) + " --boot bootA --publish --reserve-bytes 1073741824 --consumer c0 --out " + resultsA, "");
+    Proc wa; wa.valid = spawn2(worker, "--port " + std::to_string(port) + " --boot bootA --publish --reserve-bytes 1073741824 --consumer c0 --out " + resultsA, "", wa);
     CHECK(wa.valid, "worker A spawned");
     CHECK(wait_file(resultsA, "RESERVED", R), "worker A reserved");
     std::string rid = pid_after(read_file(resultsA), "RESERVED");
@@ -113,9 +118,10 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(600));
 
 
-    spawn2(worker, "--port " + std::to_string(port) + " --boot bootA2 --publish --commit " + rid + " --out " + resultsA2, "");
+    Proc wa2; spawn2(worker, "--port " + std::to_string(port) + " --boot bootA2 --publish --commit " + rid + " --out " + resultsA2, "", wa2);
     CHECK(wait_file(resultsA2, "COMMIT_RESULT", R), "worker A2 commit result");
     CHECK(read_file(resultsA2).find("ok=0") != std::string::npos, "old worker-boot reservation commit fenced");
+    kill(wa2);
 
     kill(c);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -132,33 +138,36 @@ int main(int argc, char** argv) {
     std::string resultsB2 = (dir / "cxl_mp_workerB2.txt").string();
     std::string resultsB3 = (dir / "cxl_mp_workerB3.txt").string();
 
-    Proc c; c.valid = spawn2(coord, "--port " + std::to_string(port) + " --epoch 1 --persist " + persist + " --statefile " + sf2, "");
+    Proc c; c.valid = spawn2(coord, "--port " + std::to_string(port) + " --epoch 1 --persist " + persist + " --statefile " + sf2, "", c);
     CHECK(c.valid, "coordinator B spawned");
     CHECK(wait_port(port, 5000), "coordinator B listening");
-    Proc wb; wb.valid = spawn2(worker, "--port " + std::to_string(port) + " --boot bootB --publish --reserve-bytes 1073741824 --consumer c1 --out " + resultsB, "");
+    Proc wb; wb.valid = spawn2(worker, "--port " + std::to_string(port) + " --boot bootB --publish --reserve-bytes 1073741824 --consumer c1 --out " + resultsB, "", wb);
     CHECK(wb.valid, "worker B spawned");
     CHECK(wait_file(resultsB, "RESERVED", R), "worker B reserved");
     std::string rid2 = pid_after(read_file(resultsB), "RESERVED");
     CHECK(!rid2.empty(), "parsed reservation id 2");
     CHECK(wait_state(sf2, "epoch=1", R), "epoch=1 present");
+    kill(wb);
 
     kill(c);
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
-    Proc c2; c2.valid = spawn2(coord, "--port " + std::to_string(port) + " --epoch 2 --persist " + persist + " --statefile " + sf2, "");
+    Proc c2; c2.valid = spawn2(coord, "--port " + std::to_string(port) + " --epoch 2 --persist " + persist + " --statefile " + sf2, "", c2);
     CHECK(c2.valid, "coordinator B2 spawned");
     CHECK(wait_port(port, 5000), "coordinator B2 listening");
     CHECK(wait_state(sf2, "epoch=2", R), "epoch advanced to 2");
     CHECK(wait_state(sf2, "REVALIDATION_REQUIRED", R), "dynamic evidence not silently current after restart");
     CHECK(wait_state(sf2, "evidence_current=0", R), "evidence stale after restart");
 
-    spawn2(worker, "--port " + std::to_string(port) + " --boot bootB2 --commit " + rid2 + " --out " + resultsB2, "");
+    Proc wb2; spawn2(worker, "--port " + std::to_string(port) + " --boot bootB2 --commit " + rid2 + " --out " + resultsB2, "", wb2);
     CHECK(wait_file(resultsB2, "COMMIT_RESULT", R), "commit result 2");
     CHECK(read_file(resultsB2).find("ok=0") != std::string::npos, "old epoch reservation commit rejected");
+    kill(wb2);
 
-    spawn2(worker, "--port " + std::to_string(port) + " --boot bootB3 --publish --reserve-bytes 1073741824 --consumer c1 --out " + resultsB3, "");
+    Proc wb3; spawn2(worker, "--port " + std::to_string(port) + " --boot bootB3 --publish --reserve-bytes 1073741824 --consumer c1 --out " + resultsB3, "", wb3);
     CHECK(wait_file(resultsB3, "RESERVED", R), "fresh reservation under epoch 2");
     CHECK(!pid_after(read_file(resultsB3), "RESERVED").empty(), "fresh reservation id parsed");
+    kill(wb3);
 
     kill(c2);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));

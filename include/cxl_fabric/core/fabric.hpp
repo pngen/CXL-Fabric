@@ -129,6 +129,11 @@ private:
   void recompute_pool_locked(const std::string& pool_key, CxlPool& pool);
   void recompute_global_locked();
   SelectionOutcome build_selection(const StateSnapshot& snap, const AdmissionRequest& req) const;
+  // Build the capacity-bearing view needed by selection (devices/pools/regions)
+  // WITHOUT the reservation ledger, which is irrelevant to a placement decision
+  // but grows monotonically. Copying the whole `state_` here makes admission
+  // O(n^2) under sustained churn; selection only consults the bounded topology.
+  StateSnapshot selection_snapshot_locked() const;
   const CxlDevice* find_device_locked(const DeviceId& d) const;
   const CxlRegion* find_region_locked(const RegionId& r) const;
   const CxlPool* find_pool_locked(const PoolId& p) const;

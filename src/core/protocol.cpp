@@ -8,8 +8,14 @@
 namespace cxl_fabric {
 
 namespace {
+// Accept every defined FrameType. QUERY_STATE (22) and QUERY_STATE_RESULT (23)
+// are the wire types for the coordinator query channel; a hardcoded upper bound
+// that predates them silently rejected a legitimate request as BAD_TYPE, which
+// the coordinator treated as a transport error and closed the connection --
+// the fresh-worker --query read race. Tie the bound to the highest enumerated
+// value so newly added frame types remain decodable.
 bool valid_type(std::uint16_t t) {
-  return t >= 1 && t <= 21;
+  return t >= 1 && t <= static_cast<std::uint16_t>(FrameType::QUERY_STATE_RESULT);
 }
 std::uint32_t load_u32(const std::uint8_t* p) {
   return (std::uint32_t(p[0]) << 24) | (std::uint32_t(p[1]) << 16) |

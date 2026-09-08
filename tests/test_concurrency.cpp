@@ -28,7 +28,11 @@ int main() {
   const int threads = 8, iters = 2000;
   std::vector<std::thread> ts;
   for (int t = 0; t < threads; ++t) {
-    ts.emplace_back([&]{
+    // Capture t by value: the outer loop variable's scope ends before the
+    // worker threads join, so capturing it by reference ([&]) is a genuine data
+    // race and a stack-use-after-scope (caught by ASan). By-value capture also
+    // gives each thread the distinct consumer id the test intends.
+    ts.emplace_back([&, t]{
       AuthorityContext c; c.coordinator_epoch=f.epoch(); c.policy_generation=f.policy_generation(); c.consumer_generation=ConsumerGeneration(1);
       for (int i = 0; i < iters; ++i) {
         AdmissionRequest req; req.bytes = 1ull<<30; req.consumer = ConsumerId("c"+std::to_string(t));
