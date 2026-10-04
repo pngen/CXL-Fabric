@@ -56,8 +56,8 @@ A synthetic CXL Type-3 device is not real CXL hardware.
 | Versioned, integrity-checked persistence | Firmware/BIOS/ACPI/switch management, vendor management |
 | REAL / DERIVED / SYNTHETIC / UNSUPPORTED separation | CXL accelerator-access claims without evidence |
 
-Adjacent ownership remains explicit: Topology Fabric supplies generic topology facts, PCIe
-Fabric supplies PCIe attachment facts, NUMA Fabric supplies NUMA-domain facts. CXL Fabric
+Adjacent ownership remains explicit: [Topology Fabric](https://github.com/pngen/Topology-Fabric) supplies generic topology facts, PCIe
+Fabric supplies PCIe attachment facts, [NUMA Fabric](https://github.com/pngen/NUMA-Fabric) supplies NUMA-domain facts. CXL Fabric
 interprets CXL-specific memory consequences but never absorbs those runtimes. Memory Expansion
 Fabric, which follows CXL Fabric, owns the broader expanded/pooled-memory abstraction.
 
