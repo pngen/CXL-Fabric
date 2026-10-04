@@ -203,7 +203,7 @@ pooling as CXL without real CXL evidence.
 
 ## Actual local hardware findings
 
-The SystemBackend enumerated this development machine (host **PAUL**) via documented
+The SystemBackend enumerated this development machine (the development host) via documented
 SetupAPI/PnP mechanisms:
 
 - 286 present devices enumerated (REAL).
