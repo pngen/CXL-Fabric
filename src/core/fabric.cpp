@@ -193,7 +193,12 @@ DecisionReason Fabric::update_region(const CxlRegion& region, const AuthorityCon
   auto it = state_.regions.find(region.id);
   if (it == state_.regions.end()) return DecisionReason::REGION_STALE;
   if (region.generation < it->second.generation) return DecisionReason::REGION_STALE;
-  it->second = region;
+  // Reserved/committed bytes are owned by the live reservations, never by the
+  // caller's record: overwriting them would underflow the next commit/release.
+  CxlRegion next = region;
+  next.reserved_bytes = it->second.reserved_bytes;
+  next.committed_bytes = it->second.committed_bytes;
+  it->second = std::move(next);
   return DecisionReason::OK;
 }
 
@@ -421,8 +426,11 @@ SelectionOutcome Fabric::build_selection(const StateSnapshot& snap, const Admiss
 
 SelectionOutcome Fabric::select(const AdmissionRequest& req) const {
   std::lock_guard<std::mutex> lock(mutex_);
-  StateSnapshot snap = selection_snapshot_locked();
-  return build_selection(snap, req);
+  // The outcome owns the snapshot its candidate records point into.
+  auto snap = std::make_shared<StateSnapshot>(selection_snapshot_locked());
+  SelectionOutcome out = build_selection(*snap, req);
+  out.view = std::move(snap);
+  return out;
 }
 
 ReserveOutcome Fabric::reserve(const AdmissionRequest& req, const AuthorityContext& ctx) {
@@ -509,7 +517,11 @@ ReserveOutcome Fabric::commit(const ReservationId& res_id, const AuthorityContex
   if (pit->second.generation != res.pool_generation) { o.reason = DecisionReason::POOL_GENERATION_STALE; return o; }
   if (rit->second.generation != res.region_generation) { o.reason = DecisionReason::REGION_STALE; return o; }
   if (dit->second.generation != res.device_generation) { o.reason = DecisionReason::DEVICE_STALE; return o; }
-  if (res.bytes > pit->second.reserved_bytes) { o.reason = DecisionReason::CAPACITY_OVERCOMMIT; return o; }
+  // A device reboot (new incarnation) fences reservations made under the old one.
+  if (dit->second.boot_id != res.device_boot_id) { o.reason = DecisionReason::DEVICE_STALE; return o; }
+  if (res.bytes > pit->second.reserved_bytes || res.bytes > rit->second.reserved_bytes) {
+    o.reason = DecisionReason::CAPACITY_OVERCOMMIT; return o;
+  }
   pit->second.reserved_bytes -= res.bytes;
   pit->second.committed_bytes += res.bytes;
   rit->second.reserved_bytes -= res.bytes;
@@ -532,39 +544,53 @@ ReserveOutcome Fabric::release(const ReservationId& res_id, const AuthorityConte
   if (res.state != ResumeState::COMMITTED && res.state != ResumeState::RESERVED) {
     o.reason = DecisionReason::RESERVATION_STALE; return o;
   }
-  // Release from the pool then the region, never going negative and never
-  // leaving a remainder (which would indicate a corrupt accounting mismatch).
-  auto pit = state_.pools.find(res.pool);
-  auto rit = state_.regions.find(res.region);
-  if (pit != state_.pools.end()) {
-    ByteCount remaining = res.bytes;
-    if (remaining > 0 && pit->second.committed_bytes > 0) {
-      ByteCount take = remaining < pit->second.committed_bytes ? remaining : pit->second.committed_bytes;
-      pit->second.committed_bytes -= take;
-      remaining -= take;
-    }
-    if (remaining > 0 && remaining <= pit->second.reserved_bytes) {
-      pit->second.reserved_bytes -= remaining;
-      remaining = 0;
-    }
-    if (remaining != 0) { o.reason = DecisionReason::RESERVATION_CONFLICT; return o; }
+  // Like commit, a release comes only from the worker incarnation that holds
+  // the reservation.
+  if (!ctx.worker_boot_id.empty() && ctx.worker_boot_id != res.worker_boot_id) {
+    o.reason = DecisionReason::RESERVATION_STALE; return o;
   }
-  if (rit != state_.regions.end()) {
-    ByteCount remaining = res.bytes;
-    if (remaining > 0 && rit->second.committed_bytes > 0) {
-      ByteCount take = remaining < rit->second.committed_bytes ? remaining : rit->second.committed_bytes;
-      rit->second.committed_bytes -= take;
-      remaining -= take;
-    }
-    if (remaining > 0 && remaining <= rit->second.reserved_bytes) {
-      rit->second.reserved_bytes -= remaining;
-      remaining = 0;
-    }
-  }
+  if (!release_bytes_locked(res)) { o.reason = DecisionReason::RESERVATION_CONFLICT; return o; }
   res.state = ResumeState::RELEASED;
   recompute_global_locked();
   o.ok = true; o.reason = DecisionReason::OK; o.reservation = res;
   return o;
+}
+
+bool Fabric::release_bytes_locked(const Reservation& res) {
+  // Release from the category the reservation occupies (committed or reserved)
+  // in both the pool and the region, never going negative and never touching
+  // another reservation's bytes; nothing changes unless both lines can release.
+  const bool committed = res.state == ResumeState::COMMITTED;
+  auto pit = state_.pools.find(res.pool);
+  auto rit = state_.regions.find(res.region);
+  ByteCount* pool_line = nullptr;
+  ByteCount* region_line = nullptr;
+  if (pit != state_.pools.end()) {
+    pool_line = committed ? &pit->second.committed_bytes : &pit->second.reserved_bytes;
+    if (*pool_line < res.bytes) return false;
+  }
+  if (rit != state_.regions.end()) {
+    region_line = committed ? &rit->second.committed_bytes : &rit->second.reserved_bytes;
+    if (*region_line < res.bytes) return false;
+  }
+  if (pool_line) *pool_line -= res.bytes;
+  if (region_line) *region_line -= res.bytes;
+  return true;
+}
+
+std::size_t Fabric::release_worker_reservations(const WorkerBootId& boot, const AuthorityContext& ctx) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (boot.empty() || ctx.coordinator_epoch != state_.coordinator_epoch) return 0;
+  std::size_t released = 0;
+  for (auto& kv : state_.reservations) {
+    Reservation& res = kv.second;
+    if (res.worker_boot_id != boot || res.state != ResumeState::RESERVED) continue;
+    if (!release_bytes_locked(res)) continue;
+    res.state = ResumeState::RELEASED;
+    ++released;
+  }
+  if (released) recompute_global_locked();
+  return released;
 }
 
 Fabric::FailoverPlan Fabric::plan_failover(const PoolId& pool_id, const DeviceId& failed_device,
@@ -577,7 +603,15 @@ Fabric::FailoverPlan Fabric::plan_failover(const PoolId& pool_id, const DeviceId
   for (const auto& kv : state_.pools) {
     for (const auto& m : kv.second.members) if (m.device == failed_device) failed_domain = m.failure_domain;
   }
-  StateSnapshot snap = state_;
+  // The plan owns the snapshot its replacement's record pointers point into.
+  auto view = std::make_shared<StateSnapshot>(state_);
+  const StateSnapshot& snap = *view;
+  plan.view = view;
+  // A candidate's failure domain is its pool membership's failure-domain key.
+  auto member_domain = [](const CxlPool& pool, const DeviceId& device) -> std::string {
+    for (const auto& m : pool.members) if (m.device == device) return m.failure_domain;
+    return std::string();
+  };
   // Prefer a replacement outside the failed device's failure domain. That is
   // authority to *use* a replacement target; moving data into it belongs to an
   // adjacent movement runtime, never to CXL Fabric.
@@ -605,7 +639,7 @@ Fabric::FailoverPlan Fabric::plan_failover(const PoolId& pool_id, const DeviceId
         c.pool_record = &p;
         SelectionResult r = evaluate_candidate(c, req, p.evidence_current);
         if (!r.selected) continue;
-        bool same = (!failed_domain.empty() && dit->second.economics.notes == failed_domain);
+        bool same = (!failed_domain.empty() && member_domain(p, did) == failed_domain);
         (same ? same_domain : cross_domain).push_back(c);
       }
     }
@@ -663,13 +697,19 @@ void Fabric::import_persisted(const PersistedState& in) {
     kv.second.state = DeviceState::REVALIDATION_REQUIRED;
     kv.second.health = HealthState::UNKNOWN;
   }
+  // The reservations are gone, so is the capacity they held: keeping their
+  // reserved/committed bytes would leak it for good (nothing can release them).
   for (auto& kv : state_.regions) {
     kv.second.evidence_current = false;
     kv.second.state = RegionState::REVALIDATION_REQUIRED;
+    kv.second.reserved_bytes = 0;
+    kv.second.committed_bytes = 0;
   }
   for (auto& kv : state_.pools) {
     kv.second.evidence_current = false;
     kv.second.state = PoolState::REVALIDATION_REQUIRED;
+    kv.second.reserved_bytes = 0;
+    kv.second.committed_bytes = 0;
   }
   recompute_global_locked();
 }

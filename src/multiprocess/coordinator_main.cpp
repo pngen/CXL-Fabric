@@ -203,6 +203,9 @@ private:
     AuthorityContext ctx; ctx.coordinator_epoch = fabric_.epoch();
     ctx.policy_generation = fabric_.policy_generation();
     for (const auto& d : it->second->devices) fabric_.mark_device_revalidation(d, ctx);
+    // Its uncommitted reservations can never be committed or released by another
+    // incarnation: release them so their capacity is not held forever.
+    fabric_.release_worker_reservations(it->second->boot, ctx);
     if (!statefile_.empty()) write_statefile();
   }
 
@@ -225,14 +228,18 @@ private:
 
   void maybe_persist() { if (!persist_.empty()) persist_now(); if (!statefile_.empty()) write_statefile(); }
 
+  // Connection threads persist concurrently; the state file, its .tmp and the
+  // statefile are written by one thread at a time.
   void write_statefile() {
     if (statefile_.empty()) return;
+    std::lock_guard<std::mutex> lock(persist_mu_);
     std::ofstream ofs(statefile_, std::ios::out | std::ios::trunc);
     if (ofs) ofs << fabric_state_text();
   }
 
   void persist_now() {
     using namespace cxl_fabric;
+    std::lock_guard<std::mutex> lock(persist_mu_);
     PersistedState st;
     if (fabric_.export_persisted(st)) {
       std::vector<std::uint8_t> payload; std::string err;
@@ -251,6 +258,7 @@ private:
   std::thread accept_thread_;
   std::mutex workers_mu_;
   std::map<std::string, std::shared_ptr<WorkerState>> workers_;
+  std::mutex persist_mu_;  // leaf lock: never held while taking workers_mu_
 };
 
 }  // namespace

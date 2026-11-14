@@ -12,6 +12,7 @@
 #include "cxl_fabric/core/selection.hpp"
 #include "cxl_fabric/persistence/persistence.hpp"
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -44,6 +45,9 @@ struct SelectionOutcome {
   Candidate chosen;               // the winning candidate
   SelectionResult result;         // structured decision + factors
   std::vector<SelectionResult> candidates;  // all evaluated, for explanation
+  // The evaluated state; chosen's record pointers point into it, so it lives
+  // as long as the outcome does.
+  std::shared_ptr<const StateSnapshot> view;
 };
 
 struct ReserveOutcome {
@@ -107,9 +111,19 @@ public:
   ReserveOutcome reserve(const AdmissionRequest& req, const AuthorityContext& ctx);
   ReserveOutcome commit(const ReservationId& res, const AuthorityContext& ctx);
   ReserveOutcome release(const ReservationId& res, const AuthorityContext& ctx);
+  // Worker death: releases the uncommitted reservations of that incarnation
+  // (no other incarnation can commit or release them). Committed capacity stays
+  // accounted. Returns the number released.
+  std::size_t release_worker_reservations(const WorkerBootId& boot, const AuthorityContext& ctx);
 
   // --- Failover (selection only; data movement belongs to adjacent runtimes) ---
-  struct FailoverPlan { FailoverOutcome outcome; std::optional<Candidate> replacement; std::string note; };
+  // `view` keeps the evaluated state alive for the replacement's record pointers.
+  struct FailoverPlan {
+    FailoverOutcome outcome;
+    std::optional<Candidate> replacement;
+    std::string note;
+    std::shared_ptr<const StateSnapshot> view;
+  };
   FailoverPlan plan_failover(const PoolId& pool, const DeviceId& failed_device,
                              const AdmissionRequest& req, const AuthorityContext& ctx) const;
 
@@ -128,6 +142,9 @@ public:
 private:
   void recompute_pool_locked(const std::string& pool_key, CxlPool& pool);
   void recompute_global_locked();
+  // Removes a reservation's bytes from the pool and region category it
+  // occupies; validated before anything changes. Callers hold mutex_.
+  bool release_bytes_locked(const Reservation& res);
   SelectionOutcome build_selection(const StateSnapshot& snap, const AdmissionRequest& req) const;
   // Build the capacity-bearing view needed by selection (devices/pools/regions)
   // WITHOUT the reservation ledger, which is irrelevant to a placement decision

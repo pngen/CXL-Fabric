@@ -11,7 +11,7 @@ function(cxl_fabric_add_test name)
 endfunction()
 
 foreach(t IN ITEMS test_core test_capabilities test_persistence test_protocol
-                test_property test_concurrency)
+                test_property test_concurrency test_regression)
   cxl_fabric_add_test(${t})
 endforeach()
 # The multiprocess proof drives the real coordinator/worker executables.
@@ -41,6 +41,21 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_query.cpp")
   endif()
   add_test(NAME test_query
            COMMAND test_query
+                   $<TARGET_FILE:cxl_fabric_coordinator>
+                   $<TARGET_FILE:cxl_fabric_worker>)
+endif()
+
+# Worker death releases the dead incarnation's uncommitted reservations.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_mp_regression.cpp")
+  add_executable(test_mp_regression test_mp_regression.cpp)
+  target_link_libraries(test_mp_regression PRIVATE CXLFabric::core CXLFabric::synthetic CXLFabric::system)
+  cxl_fabric_set_warnings(test_mp_regression)
+  cxl_fabric_apply_asan(test_mp_regression)
+  if(MSVC)
+    target_link_libraries(test_mp_regression PRIVATE ws2_32)
+  endif()
+  add_test(NAME test_mp_regression
+           COMMAND test_mp_regression
                    $<TARGET_FILE:cxl_fabric_coordinator>
                    $<TARGET_FILE:cxl_fabric_worker>)
 endif()
